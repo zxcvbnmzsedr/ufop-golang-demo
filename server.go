@@ -1,33 +1,41 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
+	"image"
+	_ "image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	_ "image/png"
 	"io/ioutil"
 	"log"
 	"net/http"
+	url2 "net/url"
 	"os"
-	"text/template"
-	"time"
+	"strings"
 )
 
 // HTTPGetMaxSize 最大处理的文件长度
 const HTTPGetMaxSize = 2 * 1024 * 1024
 
-func httpGet(url string) (body []byte, err error) {
-	res, err := http.Get(url)
+func httpGet(url string) (body []byte, err error, res *http.Response) {
+	res, err = http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("httpGet error: %s", err)
+		return nil, fmt.Errorf("httpGet error: %s", err), res
 	}
 	defer res.Body.Close()
 	body, err = ioutil.ReadAll(http.MaxBytesReader(nil, res.Body, HTTPGetMaxSize))
 	if err != nil {
-		return nil, fmt.Errorf("httpGet read body error: %s", err)
+		return nil, fmt.Errorf("httpGet read body error: %s", err), res
 	}
 	return
 }
 
 func handler(rw http.ResponseWriter, req *http.Request) {
+	log.Println("获取到请求", req.URL.RawQuery)
+	println("获取到请求", req.URL.RawQuery)
 	var err error
 	defer func() {
 		if err != nil {
@@ -36,12 +44,15 @@ func handler(rw http.ResponseWriter, req *http.Request) {
 	}()
 
 	defer req.Body.Close()
-
 	var body []byte
+	var res *http.Response
+
+	cmd, _ := url2.QueryUnescape(req.URL.Query().Get("cmd"))
+	op := strings.Split(cmd, "/")
 
 	url := req.URL.Query().Get("url")
 	if url != "" {
-		body, err = httpGet(url)
+		body, err, res = httpGet(url)
 		if err != nil {
 			log.Println("handler http get error:", err.Error())
 		}
@@ -53,24 +64,84 @@ func handler(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	tpl, err := template.New("res").Parse(`
-req body:
--------------
-{{.body}}
+	img, err := png.Decode(bytes.NewReader(body))
+	switch op[1] {
+	// handler/grey
+	case "grey":
+		img = greyImage(img)
+		break
+	// handler/background
+	case "background":
+		img = backGroundImage(img, op[2])
+		break
 
-time: {{.time}}
-		`)
-	if err != nil {
-		panic("")
 	}
-	brw := bufio.NewWriter(rw)
-	length := len(body)
-	tpl.Execute(brw, map[string]interface{}{
-		"body":   string(body),
-		"length": length,
-		"time":   time.Now(),
-	})
-	brw.Flush()
+	write(rw, img, res)
+
+}
+
+/**
+ * 给图片增加背景颜色
+ */
+func backGroundImage(srcImage image.Image, color string) image.Image {
+	bounds := srcImage.Bounds()
+	newRgba := image.NewRGBA(bounds)
+	c, _ := ParseHexColor(color)
+	for x := 0; x < newRgba.Bounds().Dx(); x++ { // 将背景图涂黑
+		for y := 0; y < newRgba.Bounds().Dy(); y++ {
+			newRgba.Set(x, y, c)
+		}
+	}
+	// 在中间贴图
+	draw.Draw(newRgba, newRgba.Bounds(), srcImage, image.Pt(0, 0), draw.Over)
+	return newRgba
+}
+func ParseHexColor(s string) (c color.RGBA, err error) {
+	c.A = 0xff
+	switch len(s) {
+	case 6:
+		_, err = fmt.Sscanf(s, "%02x%02x%02x", &c.R, &c.G, &c.B)
+	case 3:
+		_, err = fmt.Sscanf(s, "%1x%1x%1x", &c.R, &c.G, &c.B)
+		// Double the hex digits:
+		c.R *= 17
+		c.G *= 17
+		c.B *= 17
+	case 5:
+		s = "0" + s
+		_, err = fmt.Sscanf(s, "%02x%02x%02x", &c.R, &c.G, &c.B)
+	default:
+		err = fmt.Errorf("invalid length, must be 7 or 4")
+
+	}
+	return
+}
+
+/**
+ * 图片灰化处理
+ */
+func greyImage(m image.Image) *image.RGBA {
+	bounds := m.Bounds()
+	dx := bounds.Dx()
+	dy := bounds.Dy()
+	newRgba := image.NewRGBA(bounds)
+	for i := 0; i < dx; i++ {
+		for j := 0; j < dy; j++ {
+			colorRgb := m.At(i, j)
+			_, g, _, a := colorRgb.RGBA()
+			gUint8 := uint8(g >> 8)
+			aUint8 := uint8(a >> 8)
+			newRgba.SetRGBA(i, j, color.RGBA{R: gUint8, G: gUint8, B: gUint8, A: aUint8})
+		}
+	}
+	return newRgba
+}
+func write(rw http.ResponseWriter, img image.Image, res *http.Response) {
+	if res != nil {
+		rw.Header().Set("content-type", res.Header.Get("content-type"))
+		rw.Header().Set("Content-Disposition", res.Header.Get("Content-Disposition"))
+	}
+	png.Encode(rw, img)
 }
 
 func health(rw http.ResponseWriter, req *http.Request) {
