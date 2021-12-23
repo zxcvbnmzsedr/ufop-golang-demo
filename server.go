@@ -101,6 +101,9 @@ func ParseHexColor(s string) (c color.RGBA, err error) {
 	switch len(s) {
 	case 6:
 		_, err = fmt.Sscanf(s, "%02x%02x%02x", &c.R, &c.G, &c.B)
+	case 8:
+		s = s[2:]
+		_, err = fmt.Sscanf(s, "%02x%02x%02x", &c.R, &c.G, &c.B)
 	case 3:
 		_, err = fmt.Sscanf(s, "%1x%1x%1x", &c.R, &c.G, &c.B)
 		// Double the hex digits:
